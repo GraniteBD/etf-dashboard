@@ -17,7 +17,7 @@ function get(url, headers) {
 
 exports.handler = async function (event) {
   const symbols = event.queryStringParameters && event.queryStringParameters.symbols;
-  const mode    = event.queryStringParameters && event.queryStringParameters.mode; // "quotes" or "aum"
+  const mode    = event.queryStringParameters && event.queryStringParameters.mode;
 
   if (!symbols) {
     return {
@@ -70,7 +70,7 @@ exports.handler = async function (event) {
 
   // ── MODE: QUOTES (default) ────────────────────────────────────────────────
   // Uses 3B Data — bulk endpoint, all tickers in one call
-  // Chunk into batches of 100 (API limit)
+  // Chunked into batches of 100
   const headers = {
     "x-rapidapi-key":  RAPIDAPI_KEY,
     "x-rapidapi-host": "yahoo-finance-real-time1.p.rapidapi.com",
@@ -86,7 +86,7 @@ exports.handler = async function (event) {
   const allResults = [];
   for (const chunk of chunks) {
     try {
-      const url = `https://yahoo-finance-real-time1.p.rapidapi.com/v1/market/quotes?symbols=${chunk.join(",")}&region=US`;
+      const url = `https://yahoo-finance-real-time1.p.rapidapi.com/market/get-quotes?symbols=${chunk.join(",")}&region=US`;
       const data = await get(url, headers);
       const results = data?.quoteResponse?.result || [];
       allResults.push(...results);
