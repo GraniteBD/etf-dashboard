@@ -50,10 +50,8 @@ exports.handler = async function (event) {
         try {
           const url = `https://yahoo-finance15.p.rapidapi.com/api/v1/markets/stock/modules?ticker=${encodeURIComponent(symbol)}&module=statistics`;
           const data = await get(url, headers);
-          // Debug: log full response so we can see the structure
-          console.log(`AUM response for ${symbol}:`, JSON.stringify(data).slice(0, 500));
           const totalAssets = data?.body?.totalAssets?.raw ?? null;
-          return { symbol, totalAssets, debug: data?.body?.totalAssets ?? data?.message ?? "no body" };
+          return { symbol, totalAssets };
         } catch (err) {
           return { symbol, totalAssets: null, debug: err.message };
         }
