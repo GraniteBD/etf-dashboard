@@ -48,7 +48,7 @@ exports.handler = async function (event) {
     const results = await Promise.all(
       tickers.map(async (symbol) => {
         try {
-          const url = `https://yahoo-finance15.p.rapidapi.com/api/v1/stock/modules?ticker=${encodeURIComponent(symbol)}&module=statistics`;
+          const url = `https://yahoo-finance15.p.rapidapi.com/api/v1/markets/stock/modules?ticker=${encodeURIComponent(symbol)}&module=statistics`;
           const data = await get(url, headers);
           // Debug: log full response so we can see the structure
           console.log(`AUM response for ${symbol}:`, JSON.stringify(data).slice(0, 500));
