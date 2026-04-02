@@ -124,14 +124,63 @@ function xLabel(idx,tf,total){
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
-async function fetchYF(symbols){
-  if(!symbols.length)return null;
-  try{
-    const r=await fetch(`/.netlify/functions/quotes?symbols=${symbols.join(",")}`,{signal:AbortSignal.timeout(10000)});
-    if(!r.ok)return null;
-    const d=await r.json();
-    return d?.quoteResponse?.result||null;
-  }catch{return null;}
+const AUM_CACHE_KEY = "etf_aum_cache";
+const AUM_CACHE_TTL = 1000 * 60 * 60 * 20; // 20 hours
+
+async function fetchYF(symbols) {
+  if (!symbols.length) return null;
+  try {
+    const chunks = [];
+    for (let i = 0; i < symbols.length; i += 100) chunks.push(symbols.slice(i, i + 100));
+    const all = [];
+    for (const chunk of chunks) {
+      const r = await fetch(`/.netlify/functions/quotes?symbols=${chunk.join(",")}`, {signal: AbortSignal.timeout(10000)});
+      if (!r.ok) continue;
+      const d = await r.json();
+      const results = d?.quoteResponse?.result || [];
+      all.push(...results);
+    }
+    return all.length ? all : null;
+  } catch { return null; }
+}
+
+async function fetchAUM(symbols) {
+  if (!symbols.length) return {};
+  // Check cache first
+  try {
+    const cached = localStorage.getItem(AUM_CACHE_KEY);
+    if (cached) {
+      const { timestamp, data } = JSON.parse(cached);
+      if (Date.now() - timestamp < AUM_CACHE_TTL) {
+        console.log("AUM loaded from cache");
+        return data;
+      }
+    }
+  } catch {}
+
+  // Fetch fresh — one at a time via SteadyAPI statistics module
+  const aum = {};
+  // Batch into groups of 10 to avoid rate limits
+  const BATCH = 10;
+  for (let i = 0; i < symbols.length; i += BATCH) {
+    const chunk = symbols.slice(i, i + BATCH);
+    try {
+      const r = await fetch(`/.netlify/functions/quotes?mode=aum&symbols=${chunk.join(",")}`, {signal: AbortSignal.timeout(15000)});
+      if (!r.ok) continue;
+      const d = await r.json();
+      (d.aum || []).forEach(({symbol, totalAssets}) => {
+        if (totalAssets) aum[symbol] = totalAssets;
+      });
+    } catch {}
+    // Small delay between batches to respect rate limits
+    if (i + BATCH < symbols.length) await new Promise(r => setTimeout(r, 200));
+  }
+
+  // Cache the result
+  try {
+    localStorage.setItem(AUM_CACHE_KEY, JSON.stringify({ timestamp: Date.now(), data: aum }));
+  } catch {}
+  return aum;
 }
 
 // ── MARKET BAR ────────────────────────────────────────────────────────────────
@@ -337,9 +386,33 @@ function App(){
     const tickers=[...new Set(allFunds.map(f=>f.ticker).filter(Boolean))];
     setChartData(genChartData(tickers,tf));
     setPriceLoading(true);
-    fetchYF(tickers.slice(0,100)).then(qList=>{
-      if(qList?.length){const qm={};qList.forEach(q=>{qm[q.symbol]=q;});setQuotes(qm);setDemoPrice(false);}
-      else{setQuotes(buildDemoPrices(allFunds));setDemoPrice(true);}
+
+    // Fetch quotes and AUM in parallel
+    Promise.all([
+      fetchYF(tickers.slice(0,200)),
+      fetchAUM(tickers),
+    ]).then(([qList, aumMap])=>{
+      if(qList?.length){
+        const qm={};
+        qList.forEach(q=>{
+          // Merge AUM into quote object
+          qm[q.symbol]={...q, totalAssets: aumMap[q.symbol] ?? q.totalAssets ?? null};
+        });
+        // Add AUM for any tickers not in quote response
+        Object.entries(aumMap).forEach(([sym,aum])=>{
+          if(!qm[sym]) qm[sym]={symbol:sym, totalAssets:aum};
+        });
+        setQuotes(qm);
+        setDemoPrice(false);
+      } else {
+        const demoQ=buildDemoPrices(allFunds);
+        // Still merge real AUM if we got it
+        Object.entries(aumMap).forEach(([sym,aum])=>{
+          if(demoQ[sym]) demoQ[sym].totalAssets=aum;
+        });
+        setQuotes(demoQ);
+        setDemoPrice(true);
+      }
       setPriceLoading(false);
     });
   },[allFunds,tf]);
