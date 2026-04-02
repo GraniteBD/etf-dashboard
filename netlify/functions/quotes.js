@@ -1,63 +1,62 @@
 const https = require("https");
 
-const FINNHUB_KEY = process.env.FINNHUB_KEY;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 
-function get(url) {
+function get(url, headers) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { "X-Finnhub-Token": FINNHUB_KEY } }, (res) => {
+    https.get(url, { headers }, (res) => {
       let data = "";
       res.on("data", (c) => (data += c));
-      res.on("end", () => resolve(JSON.parse(data)));
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); }
+        catch { resolve(null); }
+      });
     }).on("error", reject);
   });
 }
 
 exports.handler = async function (event) {
   const symbols = event.queryStringParameters && event.queryStringParameters.symbols;
+  const mode    = event.queryStringParameters && event.queryStringParameters.mode; // "quotes" or "aum"
 
-  if (!symbols || !FINNHUB_KEY) {
+  if (!symbols) {
     return {
       statusCode: 400,
       headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({ error: !FINNHUB_KEY ? "Missing FINNHUB_KEY env var" : "symbols required" }),
+      body: JSON.stringify({ error: "symbols parameter required" }),
+    };
+  }
+
+  if (!RAPIDAPI_KEY) {
+    return {
+      statusCode: 500,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ error: "Missing RAPIDAPI_KEY environment variable" }),
     };
   }
 
   const tickers = symbols.split(",").map(s => s.trim()).filter(Boolean);
 
-  try {
-    // Fetch all quotes in parallel
+  // ── MODE: AUM ─────────────────────────────────────────────────────────────
+  // Uses SteadyAPI statistics module — called once per day, results cached client-side
+  if (mode === "aum") {
+    const headers = {
+      "x-rapidapi-key":  RAPIDAPI_KEY,
+      "x-rapidapi-host": "yahoo-finance15.p.rapidapi.com",
+    };
+
     const results = await Promise.all(
       tickers.map(async (symbol) => {
         try {
-          const [quote, profile] = await Promise.all([
-            get(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}`),
-            get(`https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(symbol)}`),
-          ]);
-          // Map Finnhub fields to Yahoo Finance shape so the dashboard works unchanged
-          return {
-            symbol,
-            shortName: profile.name || symbol,
-            regularMarketPrice: quote.c,                          // current price
-            regularMarketChangePercent: quote.c && quote.pc
-              ? ((quote.c - quote.pc) / quote.pc) * 100
-              : null,
-            regularMarketVolume: null,  // Finnhub free tier doesn't include volume in /quote
-            totalAssets: null,          // ETF AUM not available on free tier
-            regularMarketPreviousClose: quote.pc,
-          };
+          const url = `https://yahoo-finance15.p.rapidapi.com/api/v1/stock/modules?ticker=${encodeURIComponent(symbol)}&module=statistics`;
+          const data = await get(url, headers);
+          const totalAssets = data?.body?.totalAssets?.raw ?? null;
+          return { symbol, totalAssets };
         } catch {
-          return null;
+          return { symbol, totalAssets: null };
         }
       })
     );
-
-    const filtered = results.filter(Boolean);
-
-    // Wrap in Yahoo Finance quoteResponse shape so dashboard code needs no changes
-    const body = JSON.stringify({
-      quoteResponse: { result: filtered, error: null },
-    });
 
     return {
       statusCode: 200,
@@ -65,13 +64,45 @@ exports.handler = async function (event) {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
       },
-      body,
-    };
-  } catch (err) {
-    return {
-      statusCode: 500,
-      headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({ error: err.message }),
+      body: JSON.stringify({ aum: results }),
     };
   }
+
+  // ── MODE: QUOTES (default) ────────────────────────────────────────────────
+  // Uses 3B Data — bulk endpoint, all tickers in one call
+  // Chunk into batches of 100 (API limit)
+  const headers = {
+    "x-rapidapi-key":  RAPIDAPI_KEY,
+    "x-rapidapi-host": "yahoo-finance-real-time1.p.rapidapi.com",
+    "Content-Type":    "application/json",
+  };
+
+  const BATCH = 100;
+  const chunks = [];
+  for (let i = 0; i < tickers.length; i += BATCH) {
+    chunks.push(tickers.slice(i, i + BATCH));
+  }
+
+  const allResults = [];
+  for (const chunk of chunks) {
+    try {
+      const url = `https://yahoo-finance-real-time1.p.rapidapi.com/v1/market/quotes?symbols=${chunk.join(",")}&region=US`;
+      const data = await get(url, headers);
+      const results = data?.quoteResponse?.result || [];
+      allResults.push(...results);
+    } catch (err) {
+      console.log(`Chunk failed: ${err.message}`);
+    }
+  }
+
+  return {
+    statusCode: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+    body: JSON.stringify({
+      quoteResponse: { result: allResults, error: null },
+    }),
+  };
 };
