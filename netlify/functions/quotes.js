@@ -1,15 +1,13 @@
 const https = require("https");
 
-function fetchURL(url, options) {
+const FINNHUB_KEY = process.env.FINNHUB_KEY;
+
+function get(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, options, (res) => {
-      // Handle redirects
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchURL(res.headers.location, options).then(resolve).catch(reject);
-      }
+    https.get(url, { headers: { "X-Finnhub-Token": FINNHUB_KEY } }, (res) => {
       let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => resolve({ status: res.statusCode, body: data }));
+      res.on("data", (c) => (data += c));
+      res.on("end", () => resolve(JSON.parse(data)));
     }).on("error", reject);
   });
 }
@@ -17,51 +15,63 @@ function fetchURL(url, options) {
 exports.handler = async function (event) {
   const symbols = event.queryStringParameters && event.queryStringParameters.symbols;
 
-  if (!symbols) {
+  if (!symbols || !FINNHUB_KEY) {
     return {
       statusCode: 400,
       headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({ error: "symbols parameter required" }),
+      body: JSON.stringify({ error: !FINNHUB_KEY ? "Missing FINNHUB_KEY env var" : "symbols required" }),
     };
   }
 
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "identity",
-    "Referer": "https://finance.yahoo.com/",
-    "Connection": "keep-alive",
-  };
+  const tickers = symbols.split(",").map(s => s.trim()).filter(Boolean);
 
-  // Try both Yahoo Finance endpoints
-  const urls = [
-    `https://query1.finance.yahoo.com/v8/finance/quote?symbols=${encodeURIComponent(symbols)}&fields=regularMarketPrice,regularMarketChangePercent,regularMarketVolume,totalAssets,shortName,regularMarketPreviousClose`,
-    `https://query2.finance.yahoo.com/v8/finance/quote?symbols=${encodeURIComponent(symbols)}&fields=regularMarketPrice,regularMarketChangePercent,regularMarketVolume,totalAssets,shortName,regularMarketPreviousClose`,
-    `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}`,
-  ];
+  try {
+    // Fetch all quotes in parallel
+    const results = await Promise.all(
+      tickers.map(async (symbol) => {
+        try {
+          const [quote, profile] = await Promise.all([
+            get(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}`),
+            get(`https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(symbol)}`),
+          ]);
+          // Map Finnhub fields to Yahoo Finance shape so the dashboard works unchanged
+          return {
+            symbol,
+            shortName: profile.name || symbol,
+            regularMarketPrice: quote.c,                          // current price
+            regularMarketChangePercent: quote.c && quote.pc
+              ? ((quote.c - quote.pc) / quote.pc) * 100
+              : null,
+            regularMarketVolume: null,  // Finnhub free tier doesn't include volume in /quote
+            totalAssets: null,          // ETF AUM not available on free tier
+            regularMarketPreviousClose: quote.pc,
+          };
+        } catch {
+          return null;
+        }
+      })
+    );
 
-  for (const url of urls) {
-    try {
-      const result = await fetchURL(url, { headers });
-      if (result.status === 200 && result.body.includes("regularMarketPrice")) {
-        return {
-          statusCode: 200,
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-          },
-          body: result.body,
-        };
-      }
-    } catch (err) {
-      console.log(`Failed ${url}: ${err.message}`);
-    }
+    const filtered = results.filter(Boolean);
+
+    // Wrap in Yahoo Finance quoteResponse shape so dashboard code needs no changes
+    const body = JSON.stringify({
+      quoteResponse: { result: filtered, error: null },
+    });
+
+    return {
+      statusCode: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+      body,
+    };
+  } catch (err) {
+    return {
+      statusCode: 500,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ error: err.message }),
+    };
   }
-
-  return {
-    statusCode: 502,
-    headers: { "Access-Control-Allow-Origin": "*" },
-    body: JSON.stringify({ error: "All Yahoo Finance endpoints failed" }),
-  };
 };
