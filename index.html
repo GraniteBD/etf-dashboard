@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>GraniteShares ETF Dashboard</title>
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://unpkg.com/recharts@2.10.0/umd/Recharts.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.23.2/babel.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:system-ui,-apple-system,sans-serif;overflow:hidden;}
+  ::-webkit-scrollbar{width:6px;height:6px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  ::-webkit-scrollbar-thumb{background:rgba(128,128,128,0.3);border-radius:3px;}
+  ::-webkit-scrollbar-thumb:hover{background:rgba(128,128,128,0.5);}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="error" style="display:none;padding:40px;font-family:monospace;color:red;white-space:pre-wrap;"></div>
+<script>
+  window.onerror = function(msg, src, line, col, err) {
+    document.getElementById("error").style.display = "block";
+    document.getElementById("error").textContent = "Error: " + msg + "\nLine: " + line + "\nSource: " + src;
+  };
+</script>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+const { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
+        Tooltip, Legend, ResponsiveContainer, ReferenceLine, Cell } = Recharts;
+
+// ── CONFIG ───────────────────────────────────────────────────────────────────
+const STORAGE_KEY = "etf_fund_data_v1";
+const TIMEFRAMES  = ["1D","5D","1M","3M","YTD","1Y"];
+const ISSUER_COLORS = {
+  GraniteShares:"#FF6B35",ProShares:"#4ECDC4",Neos:"#1ABC9C",
+  "Leverage Shares":"#F39C12","Volatility Shares":"#E74C3C",Direxion:"#9B59B6",
+  YieldBoost:"#27AE60",Rex:"#2980B9",MicroSectors:"#D35400",Defiance:"#8E44AD",
+  Tuttle:"#C0392B",AdvisorShares:"#16A085",KraneShares:"#E67E22",
+  Innovator:"#2C3E50","Global X":"#1F618D",Roundhill:"#6C3483",Calamos:"#784212",
+};
+const CHART_COLORS = ["#FF6B35","#4ECDC4","#9B59B6","#F39C12","#1ABC9C","#E74C3C",
+  "#2980B9","#27AE60","#D35400","#8E44AD","#C0392B","#E67E22","#6C3483","#16A085","#784212"];
+const INDICES = [
+  {sym:"^GSPC",label:"S&P 500"},
+  {sym:"^IXIC",label:"Nasdaq"},
+  {sym:"^DJI", label:"Dow"},
+  {sym:"^RUT", label:"Russell 2K"},
+];
+const INDEX_DEMO = {
+  "^GSPC":{price:5187.70,chg:0.38},
+  "^IXIC":{price:16340.87,chg:-0.21},
+  "^DJI": {price:38884.32,chg:0.55},
+  "^RUT": {price:2063.14,chg:-0.88},
+};
+
+// ── HELPERS ──────────────────────────────────────────────────────────────────
+const f$   = v => !v||isNaN(v)?"—":v>=1e9?`$${(v/1e9).toFixed(2)}B`:v>=1e6?`$${(v/1e6).toFixed(2)}M`:`$${v.toFixed(2)}`;
+const fpct = v => v==null||isNaN(v)?"—":`${v>0?"+":""}${v.toFixed(2)}%`;
+const fvol = v => !v||isNaN(v)?"—":v>=1e9?`${(v/1e9).toFixed(2)}B`:v>=1e6?`${(v/1e6).toFixed(1)}M`:v>=1e3?`${(v/1e3).toFixed(0)}K`:String(v);
+const gc   = v => v==null?"inherit":v>0?"#22c55e":v<0?"#ef4444":"#6b7280";
+const seed = s=>{let h=0;for(let c of s){h=((h<<5)-h)+c.charCodeAt(0);h|=0;}return Math.abs(h);};
+const rng  = (s,mn=0,mx=1)=>mn+(seed(s)%10000)/10000*(mx-mn);
+
+// ── STORAGE (localStorage) ────────────────────────────────────────────────────
+const storage = {
+  get:(key)=>{try{const v=localStorage.getItem(key);return v?{value:v}:null;}catch{return null;}},
+  set:(key,val)=>{try{localStorage.setItem(key,val);return true;}catch{return null;}},
+  delete:(key)=>{try{localStorage.removeItem(key);return true;}catch{return null;}},
+};
+
+// ── CSV PARSING ───────────────────────────────────────────────────────────────
+function mapRow(row){
+  return {
+    ticker:     (row["Ticker"]           ||row["ticker"]           ||"").trim(),
+    name:       (row["Fund"]             ||row["fund"]             ||row["Fund Name"]||"").trim(),
+    issuer:     (row["Company"]          ||row["company"]          ||row["Issuer"]   ||"").trim(),
+    type:       (row["Investment Type"]  ||row["investment type"]  ||row["Type"]     ||"").trim(),
+    underlying: (row["Underlying Asset"] ||row["underlying asset"] ||row["Underlying"]||"").trim(),
+    returnGoal: (row["Return Goal"]      ||row["return goal"]      ||row["Goal"]     ||"").trim(),
+  };
+}
+function parseCSV(text){
+  const {data}=Papa.parse(text,{header:true,skipEmptyLines:true,transformHeader:h=>h.trim()});
+  return {rows:data.map(mapRow).filter(f=>f.ticker&&f.issuer),cols:Object.keys(data[0]||{})};
+}
+
+// ── DEMO / CHART DATA ─────────────────────────────────────────────────────────
+const AUM_BASE={GraniteShares:4.2e9,ProShares:65e9,Neos:8e9,"Leverage Shares":2e9,"Volatility Shares":1.5e9,Direxion:35e9,YieldBoost:0.5e9,Rex:2.5e9,MicroSectors:3e9,Defiance:4e9,Tuttle:0.8e9,AdvisorShares:1.2e9,KraneShares:5e9,Innovator:12e9,"Global X":30e9,Roundhill:2e9,Calamos:3e9};
+
+function buildDemoPrices(funds){
+  const cnt={};funds.forEach(f=>{cnt[f.issuer]=(cnt[f.issuer]||0)+1;});
+  const qm={};
+  funds.forEach(f=>{
+    const base=(AUM_BASE[f.issuer]||2e9)/Math.max(cnt[f.issuer]||1,1);
+    qm[f.ticker]={symbol:f.ticker,regularMarketPrice:+(15+rng(f.ticker+"px")*85).toFixed(2),regularMarketChangePercent:+(rng(f.ticker+"pct",-8,8)).toFixed(2),totalAssets:base*(0.5+rng(f.ticker+"aum")),regularMarketVolume:Math.round(base*0.012*(0.5+rng(f.ticker+"vol")))};
+  });
+  return qm;
+}
+
+function genChartData(tickers,tf){
+  const pts={"1D":78,"5D":100,"1M":22,"3M":63,"YTD":63,"1Y":52}[tf]||50;
+  const out={};
+  tickers.forEach(t=>{
+    let cum=0;
+    const basePrice=15+rng(t+"px")*85;
+    const baseVol=Math.round(200000+rng(t+"bv")*3000000);
+    out[t]=Array.from({length:pts},(_,i)=>{
+      cum+=rng(t+tf+i,-1.2,1.2)*0.8;
+      return{idx:i,pct:+cum.toFixed(2),price:+(basePrice*(1+cum/100)).toFixed(2),vol:Math.round(baseVol*(0.4+rng(t+tf+i+"v")*1.6))};
+    });
+  });
+  return out;
+}
+
+function xLabel(idx,tf,total){
+  if(tf==="1D"){const h=Math.floor(9.5+idx*(6.5/total)),m=Math.round(((9.5+idx*(6.5/total))%1)*60);return`${h}:${m.toString().padStart(2,"0")}`;}
+  if(tf==="5D"){return["Mon","Tue","Wed","Thu","Fri"][Math.floor(idx/total*5)]||"";}
+  const d=new Date();d.setDate(d.getDate()-(total-idx)*(tf==="1Y"?7:1));return`${d.getMonth()+1}/${d.getDate()}`;
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function fetchYF(symbols){
+  if(!symbols.length)return null;
+  try{
+    const r=await fetch(`/.netlify/functions/quotes?symbols=${symbols.join(",")}`,{signal:AbortSignal.timeout(10000)});
+    if(!r.ok)return null;
+    const d=await r.json();
+    return d?.quoteResponse?.result||null;
+  }catch{return null;}
+}
+
+// ── MARKET BAR ────────────────────────────────────────────────────────────────
+function MarketBar({dark,bdr,card,text,muted}){
+  const [data,setData]=useState(INDEX_DEMO);
+  const [lastUpdate,setLastUpdate]=useState(null);
+  const [live,setLive]=useState(false);
+  const fetch_=useCallback(async()=>{
+    const res=await fetchYF(INDICES.map(i=>i.sym));
+    if(res?.length){
+      const d={};res.forEach(q=>{d[q.symbol]={price:q.regularMarketPrice,chg:q.regularMarketChangePercent};});
+      setData(d);setLive(true);setLastUpdate(new Date());
+    }
+  },[]);
+  useEffect(()=>{fetch_();const t=setInterval(fetch_,60000);return()=>clearInterval(t);},[fetch_]);
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:"6px",flexWrap:"wrap"}}>
+      {INDICES.map(({sym,label})=>{
+        const d=data[sym]||{};const chg=d.chg??0;const up=chg>=0;const col=up?"#22c55e":"#ef4444";
+        return(
+          <div key={sym} style={{display:"flex",alignItems:"center",gap:"8px",padding:"5px 12px",borderRadius:"9999px",background:dark?"rgba(255,255,255,0.05)":"rgba(0,0,0,0.04)",border:`1px solid ${bdr}`,whiteSpace:"nowrap"}}>
+            <span style={{fontSize:"11px",color:muted,fontWeight:500}}>{label}</span>
+            <span style={{fontSize:"12px",fontWeight:700,color:text}}>{d.price?d.price.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}):"—"}</span>
+            <span style={{fontSize:"11px",fontWeight:700,color:col}}>{up?"▲":"▼"} {Math.abs(chg).toFixed(2)}%</span>
+          </div>
+        );
+      })}
+      <span style={{fontSize:"10px",color:muted,opacity:0.5}}>{live&&lastUpdate?`↻ ${lastUpdate.toLocaleTimeString()}`:"demo"}</span>
+    </div>
+  );
+}
+
+// ── MULTISELECT ───────────────────────────────────────────────────────────────
+function MultiSelect({label,options,selected,onToggle,onClear,onSelectAll,color,dark,bdr,card,text,muted}){
+  const [open,setOpen]=useState(false);
+  const [search,setSearch]=useState("");
+  const ref=useRef(null);
+  const inputRef=useRef(null);
+  const col=color||"#FF6B35";
+  useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target)){setOpen(false);setSearch("");}};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[]);
+  useEffect(()=>{if(open)setTimeout(()=>inputRef.current&&inputRef.current.focus(),50);},[open]);
+  const filtered=useMemo(()=>!search.trim()?options:options.filter(o=>o.toLowerCase().includes(search.toLowerCase())),[options,search]);
+  const bg2=dark?"rgba(255,255,255,0.07)":"rgba(0,0,0,0.05)";
+  return(
+    <div ref={ref} style={{position:"relative"}} onClick={e=>e.stopPropagation()}>
+      <button onClick={()=>setOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:"5px",padding:"4px 11px",borderRadius:"9999px",border:`1px solid ${selected.length?col:bdr}`,background:selected.length?col+"20":"transparent",color:selected.length?col:text,cursor:"pointer",fontSize:"12px",fontWeight:selected.length?700:400,whiteSpace:"nowrap"}}>
+        {label}{selected.length?` (${selected.length})`:""} <span style={{fontSize:"9px",opacity:0.6}}>▾</span>
+      </button>
+      {open&&(
+        <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:400,background:card,border:`1px solid ${bdr}`,borderRadius:"12px",padding:"8px",minWidth:"210px",maxWidth:"300px",boxShadow:"0 16px 40px rgba(0,0,0,0.4)",maxHeight:"320px",display:"flex",flexDirection:"column",gap:"4px"}}>
+          <div style={{position:"relative"}}>
+            <span style={{position:"absolute",left:"9px",top:"50%",transform:"translateY(-50%)",fontSize:"12px",opacity:0.35}}>🔍</span>
+            <input ref={inputRef} value={search} onChange={e=>setSearch(e.target.value)} placeholder="Type to filter…" style={{width:"100%",padding:"6px 8px 6px 28px",borderRadius:"8px",border:`1px solid ${bdr}`,background:bg2,color:text,fontSize:"12px",outline:"none",boxSizing:"border-box"}}/>
+            {search&&<button onClick={()=>setSearch("")} style={{position:"absolute",right:"8px",top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:muted,fontSize:"13px",padding:0}}>×</button>}
+          </div>
+          {selected.length>0&&<div onClick={onClear} style={{padding:"4px 8px",cursor:"pointer",borderRadius:"6px",fontSize:"11px",color:"#ef4444",fontWeight:600}} onMouseEnter={e=>e.currentTarget.style.background="rgba(239,68,68,0.1)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>✕ Clear all ({selected.length})</div>}
+          {onSelectAll&&selected.length<options.length&&<div onClick={onSelectAll} style={{padding:"4px 8px",cursor:"pointer",borderRadius:"6px",fontSize:"11px",color:col,fontWeight:600}} onMouseEnter={e=>e.currentTarget.style.background=dark?"rgba(255,255,255,0.06)":"rgba(0,0,0,0.05)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>✓ Select all ({options.length})</div>}
+          <div style={{overflowY:"auto",maxHeight:"230px",display:"flex",flexDirection:"column",gap:"1px"}}>
+            {filtered.length===0?<div style={{padding:"10px 8px",fontSize:"12px",color:muted,textAlign:"center"}}>No matches for "{search}"</div>
+              :filtered.map(opt=>(
+                <div key={opt} onClick={()=>onToggle(opt)} style={{padding:"6px 8px",cursor:"pointer",borderRadius:"7px",fontSize:"12px",display:"flex",alignItems:"center",gap:"8px"}} onMouseEnter={e=>e.currentTarget.style.background=dark?"rgba(255,255,255,0.06)":"rgba(0,0,0,0.05)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <div style={{width:"14px",height:"14px",borderRadius:"4px",border:`2px solid ${col}`,background:selected.includes(opt)?col:"transparent",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                    {selected.includes(opt)&&<span style={{color:"#fff",fontSize:"9px",fontWeight:900}}>✓</span>}
+                  </div>
+                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{opt}</span>
+                </div>
+              ))}
+          </div>
+          {search&&<div style={{fontSize:"10px",color:muted,textAlign:"center",paddingTop:"2px"}}>{filtered.length} of {options.length}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── ISSUER COL ────────────────────────────────────────────────────────────────
+function IssuerCol({name,totalAUM,totalVol,avgPct,fundCount,isGS,gsAUM,gsVol,gsPct,dark,bdr}){
+  const color=ISSUER_COLORS[name]||"#888";
+  return(
+    <div style={{minWidth:"155px",flex:"0 0 auto",borderRight:`1px solid ${bdr}`}}>
+      <div style={{padding:"10px 12px",background:color+"18",borderBottom:`2px solid ${color}`}}>
+        <div style={{fontWeight:800,fontSize:"13px",color}}>{name}</div>
+        <div style={{fontSize:"11px",opacity:0.45}}>{fundCount} funds</div>
+      </div>
+      {[["Total AUM",f$(totalAUM),null],["Daily Volume",fvol(totalVol),null],["Avg % Change",fpct(avgPct),gc(avgPct)]].map(([l,v,c])=>(
+        <div key={l} style={{padding:"8px 12px",borderBottom:`1px solid ${bdr}`}}>
+          <div style={{fontSize:"10px",opacity:0.4,marginBottom:"1px",textTransform:"uppercase",letterSpacing:"0.04em"}}>{l}</div>
+          <div style={{fontSize:"15px",fontWeight:700,color:c||"inherit"}}>{v}</div>
+        </div>
+      ))}
+      {!isGS&&gsAUM!=null&&(
+        <div style={{padding:"8px 12px",background:dark?"rgba(255,107,53,0.07)":"rgba(255,107,53,0.04)"}}>
+          <div style={{fontSize:"10px",color:"#FF6B35",fontWeight:700,marginBottom:"4px",textTransform:"uppercase",letterSpacing:"0.04em"}}>GS vs {name.split(" ")[0]}</div>
+          <div style={{fontSize:"11px",opacity:0.6}}>AUM: {gsAUM&&totalAUM?((gsAUM/totalAUM)*100).toFixed(1)+"%":"—"}</div>
+          <div style={{fontSize:"11px",opacity:0.6}}>Vol: {gsVol&&totalVol?((gsVol/totalVol)*100).toFixed(1)+"%":"—"}</div>
+          {gsPct!=null&&avgPct!=null&&<div style={{fontSize:"11px",fontWeight:700,color:gc(gsPct-avgPct),marginTop:"2px"}}>Δ Perf: {fpct(gsPct-avgPct)}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── UPLOAD SCREEN ─────────────────────────────────────────────────────────────
+function UploadScreen({onLoad,dark}){
+  const [dragging,setDragging]=useState(false);
+  const [error,setError]=useState("");
+  const [preview,setPreview]=useState(null);
+  const [pending,setPending]=useState(null);
+  const fileRef=useRef(null);
+  const bg=dark?"#0f172a":"#f0f4f8",card=dark?"#1e293b":"#fff",bdr=dark?"#334155":"#e2e8f0",text=dark?"#f1f5f9":"#0f172a",muted=dark?"#64748b":"#94a3b8";
+  const process=t=>{setError("");const{rows,cols}=parseCSV(t);if(!rows.length){setError(`No valid rows found.\nDetected: ${cols.join(", ")||"(none)"}`);return;}setPreview({total:rows.length,companies:[...new Set(rows.map(r=>r.issuer))],cols});setPending(rows);};
+  const handleFile=f=>{if(!f||!f.name.endsWith(".csv")){setError("Please upload a .csv file");return;}const r=new FileReader();r.onload=e=>process(e.target.result);r.readAsText(f);};
+  return(
+    <div style={{minHeight:"100vh",background:bg,color:text,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"40px 20px"}}>
+      <div style={{width:"100%",maxWidth:"560px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:"12px",marginBottom:"32px",justifyContent:"center"}}>
+          <div style={{width:"44px",height:"44px",borderRadius:"12px",background:"linear-gradient(135deg,#FF6B35,#FF4500)",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:"16px",color:"#fff"}}>GS</div>
+          <div><div style={{fontWeight:800,fontSize:"22px",letterSpacing:"-0.02em"}}>ETF Dashboard</div><div style={{fontSize:"13px",color:muted}}>GraniteShares · Competitive Intelligence</div></div>
+        </div>
+        <div onDragOver={e=>{e.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)}
+          onDrop={e=>{e.preventDefault();setDragging(false);handleFile(e.dataTransfer.files[0]);}}
+          onClick={()=>fileRef.current&&fileRef.current.click()}
+          style={{border:`2px dashed ${dragging?"#FF6B35":bdr}`,borderRadius:"16px",padding:"48px 32px",textAlign:"center",cursor:"pointer",background:dragging?"rgba(255,107,53,0.06)":card,transition:"all 0.2s",marginBottom:"16px"}}>
+          <div style={{fontSize:"40px",marginBottom:"12px"}}>📂</div>
+          <div style={{fontWeight:700,fontSize:"16px",marginBottom:"6px"}}>{dragging?"Drop it!":"Upload your fund database"}</div>
+          <div style={{color:muted,fontSize:"13px",marginBottom:"16px"}}>Drag & drop your CSV, or click to browse</div>
+          <div style={{display:"inline-block",padding:"8px 20px",borderRadius:"8px",background:"#FF6B35",color:"#fff",fontWeight:700,fontSize:"13px"}}>Choose CSV File</div>
+          <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+        </div>
+        <div style={{background:card,border:`1px solid ${bdr}`,borderRadius:"12px",padding:"16px",fontSize:"13px",color:muted,marginBottom:"16px"}}>
+          <div style={{fontWeight:600,color:text,marginBottom:"8px"}}>How to export from Google Sheets</div>
+          {["Open your fund database in Google Sheets","File → Download → Comma Separated Values (.csv)","Upload the downloaded file above"].map((s,i)=>(
+            <div key={i} style={{display:"flex",gap:"10px",alignItems:"flex-start",marginBottom:"4px"}}>
+              <span style={{width:"18px",height:"18px",borderRadius:"50%",background:"#FF6B3520",color:"#FF6B35",fontWeight:700,fontSize:"11px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{i+1}</span><span>{s}</span>
+            </div>
+          ))}
+          <div style={{marginTop:"10px",padding:"8px 10px",borderRadius:"8px",background:dark?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.03)",fontSize:"12px"}}>
+            <strong>Required columns:</strong> Ticker · Fund · Underlying Asset · Investment Type · Return Goal · Company
+          </div>
+        </div>
+        {error&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:"10px",padding:"12px 14px",color:"#ef4444",fontSize:"13px",marginBottom:"16px",whiteSpace:"pre-wrap"}}>{error}</div>}
+        {preview&&(
+          <div style={{background:card,border:"1px solid #22c55e55",borderRadius:"12px",padding:"16px"}}>
+            <div style={{fontWeight:700,color:"#22c55e",fontSize:"14px",marginBottom:"10px"}}>✓ Preview looks good</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",marginBottom:"12px"}}>
+              {[["Total Funds",preview.total],["Companies",preview.companies.length],["Columns",preview.cols.length],["Status","Ready"]].map(([l,v])=>(
+                <div key={l} style={{padding:"8px 12px",borderRadius:"8px",background:dark?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.03)"}}>
+                  <div style={{fontSize:"10px",color:muted,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:"2px"}}>{l}</div>
+                  <div style={{fontWeight:700,fontSize:"16px"}}>{v}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{fontSize:"12px",color:muted,marginBottom:"12px"}}><strong style={{color:text}}>Companies:</strong> {preview.companies.slice(0,8).join(", ")}{preview.companies.length>8?` +${preview.companies.length-8} more`:""}</div>
+            <button onClick={()=>onLoad(pending)} style={{width:"100%",padding:"10px",borderRadius:"10px",background:"#FF6B35",color:"#fff",border:"none",cursor:"pointer",fontWeight:700,fontSize:"14px"}}>Load {preview.total.toLocaleString()} Funds →</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────────────────────
+function App(){
+  const [dark,setDark]=useState(()=>localStorage.getItem("etf_dark")!=="false");
+  const [tf,setTf]=useState("1D");
+  const [tab,setTab]=useState("overview");
+  const [allFunds,setAllFunds]=useState(null);
+  const [loadedAt,setLoadedAt]=useState(null);
+  const [quotes,setQuotes]=useState({});
+  const [chartData,setChartData]=useState({});
+  const [demoPrice,setDemoPrice]=useState(false);
+  const [priceLoading,setPriceLoading]=useState(false);
+  const [selCompanies,setSelCompanies]=useState([]);
+  const [selFunds,setSelFunds]=useState([]);
+  const [selUnderlying,setSelUnderlying]=useState([]);
+  const [selReturnGoal,setSelReturnGoal]=useState([]);
+  const [selInvType,setSelInvType]=useState([]);
+  const [chartMode,setChartMode]=useState("pct");
+  const [chartExcluded,setChartExcluded]=useState([]);
+  const [sortKey,setSortKey]=useState("pct");
+  const [sortDir,setSortDir]=useState(-1);
+  const [activeMetrics,setActiveMetrics]=useState(["pct","aum"]);
+  const [searchTick,setSearchTick]=useState("");
+  const [searchRes,setSearchRes]=useState(null);
+
+  const bg=dark?"#0f172a":"#f0f4f8",card=dark?"#1e293b":"#ffffff",bdr=dark?"#334155":"#e2e8f0",
+        text=dark?"#f1f5f9":"#0f172a",muted=dark?"#64748b":"#94a3b8",
+        inp=dark?"rgba(255,255,255,0.07)":"rgba(0,0,0,0.04)",thBg=dark?"#1e293b":"#ffffff";
+  const ttStyle={background:card,border:`1px solid ${bdr}`,borderRadius:"8px",fontSize:"12px",color:text};
+
+  // Persist dark mode
+  useEffect(()=>{localStorage.setItem("etf_dark",dark);},[dark]);
+
+  // Load saved data
+  useEffect(()=>{
+    const s=storage.get(STORAGE_KEY);
+    if(s?.value){try{const{funds,loadedAt:la}=JSON.parse(s.value);if(funds?.length){setAllFunds(funds);setLoadedAt(la);}}catch{}}
+  },[]);
+
+  // Fetch prices when funds or timeframe changes
+  useEffect(()=>{
+    if(!allFunds?.length)return;
+    const tickers=[...new Set(allFunds.map(f=>f.ticker).filter(Boolean))];
+    setChartData(genChartData(tickers,tf));
+    setPriceLoading(true);
+    fetchYF(tickers.slice(0,100)).then(qList=>{
+      if(qList?.length){const qm={};qList.forEach(q=>{qm[q.symbol]=q;});setQuotes(qm);setDemoPrice(false);}
+      else{setQuotes(buildDemoPrices(allFunds));setDemoPrice(true);}
+      setPriceLoading(false);
+    });
+  },[allFunds,tf]);
+
+  const handleLoad=useCallback(async(funds)=>{
+    const ts=new Date().toLocaleString();setAllFunds(funds);setLoadedAt(ts);
+    storage.set(STORAGE_KEY,JSON.stringify({funds,loadedAt:ts}));
+  },[]);
+  const handleClearData=useCallback(()=>{
+    if(!confirm("Clear all fund data? You'll need to re-upload your CSV."))return;
+    storage.delete(STORAGE_KEY);setAllFunds(null);setLoadedAt(null);setQuotes({});setChartData({});
+  },[]);
+
+  // ── Derived state ─────────────────────────────────────────────────────────
+  const companies=useMemo(()=>{const s=[...new Set((allFunds||[]).map(f=>f.issuer).filter(Boolean))].sort();return["GraniteShares",...s.filter(x=>x!=="GraniteShares")];},[allFunds]);
+
+  const visibleIssuers=useMemo(()=>{
+    const base=new Set(["GraniteShares"]);
+    selCompanies.forEach(c=>base.add(c));
+    if(!selCompanies.length&&selUnderlying.length)(allFunds||[]).forEach(f=>{if(selUnderlying.includes(f.underlying))base.add(f.issuer);});
+    if(selFunds.length)(allFunds||[]).forEach(f=>{if(selFunds.includes(f.ticker))base.add(f.issuer);});
+    return companies.filter(c=>base.has(c));
+  },[companies,selCompanies,selUnderlying,selFunds,allFunds]);
+
+  const chartIssuers=useMemo(()=>!selCompanies.length?companies:companies.filter(c=>c==="GraniteShares"||selCompanies.includes(c)),[companies,selCompanies]);
+
+  const companyFunds=useMemo(()=>(allFunds||[]).filter(f=>visibleIssuers.includes(f.issuer)),[allFunds,visibleIssuers]);
+  const underlyingOpts=useMemo(()=>[...new Set((allFunds||[]).map(f=>f.underlying).filter(Boolean))].sort(),[allFunds]);
+  const returnGoalOpts=useMemo(()=>[...new Set(companyFunds.map(f=>f.returnGoal).filter(Boolean))].sort(),[companyFunds]);
+  const invTypeOpts=useMemo(()=>[...new Set(companyFunds.map(f=>f.type).filter(Boolean))].sort(),[companyFunds]);
+  const fundTickerOpts=useMemo(()=>companyFunds.map(f=>f.ticker),[companyFunds]);
+
+  const filteredFunds=useMemo(()=>companyFunds.filter(f=>{
+    if(selFunds.length&&!selFunds.includes(f.ticker))return false;
+    if(selUnderlying.length&&!selUnderlying.includes(f.underlying))return false;
+    if(selReturnGoal.length&&!selReturnGoal.includes(f.returnGoal))return false;
+    if(selInvType.length&&!selInvType.includes(f.type))return false;
+    return true;
+  }),[companyFunds,selFunds,selUnderlying,selReturnGoal,selInvType]);
+
+  const chartFunds=useMemo(()=>{
+    let funds;
+    if(selFunds.length) funds=(allFunds||[]).filter(f=>selFunds.includes(f.ticker));
+    else if(selUnderlying.length){
+      funds=(allFunds||[]).filter(f=>selUnderlying.includes(f.underlying));
+      if(selReturnGoal.length)funds=funds.filter(f=>selReturnGoal.includes(f.returnGoal));
+      if(selInvType.length)funds=funds.filter(f=>selInvType.includes(f.type));
+    } else funds=visibleIssuers.map(n=>filteredFunds.find(f=>f.issuer===n)).filter(Boolean);
+    return funds.filter(f=>!chartExcluded.includes(f.issuer));
+  },[allFunds,selFunds,selUnderlying,selReturnGoal,selInvType,visibleIssuers,filteredFunds,chartExcluded]);
+
+  const chartAllCompanies=useMemo(()=>{
+    let funds;
+    if(selFunds.length)funds=(allFunds||[]).filter(f=>selFunds.includes(f.ticker));
+    else if(selUnderlying.length){funds=(allFunds||[]).filter(f=>selUnderlying.includes(f.underlying));if(selReturnGoal.length)funds=funds.filter(f=>selReturnGoal.includes(f.returnGoal));if(selInvType.length)funds=funds.filter(f=>selInvType.includes(f.type));}
+    else funds=visibleIssuers.map(n=>filteredFunds.find(f=>f.issuer===n)).filter(Boolean);
+    return [...new Set(funds.map(f=>f.issuer))];
+  },[allFunds,selFunds,selUnderlying,selReturnGoal,selInvType,visibleIssuers,filteredFunds]);
+
+  const chartSeriesData=useMemo(()=>{
+    const tickers=chartFunds.map(f=>f.ticker).slice(0,16);
+    const maxLen=Math.max(...tickers.map(t=>chartData[t]?.length||0),0);
+    return Array.from({length:maxLen},(_,i)=>{
+      const pt={idx:i,label:xLabel(i,tf,maxLen)};
+      tickers.forEach(t=>{const d=chartData[t]&&chartData[t][i];if(d){pt[t+"_pct"]=d.pct;pt[t+"_price"]=d.price;pt[t+"_vol"]=d.vol;}});
+      return pt;
+    });
+  },[chartData,chartFunds,tf]);
+
+  const issuerStats=useMemo(()=>{
+    const m={};
+    visibleIssuers.forEach(name=>{
+      const funds=filteredFunds.filter(f=>f.issuer===name);let aum=0,vol=0,pcts=[];
+      funds.forEach(f=>{const q=quotes[f.ticker];if(q){if(q.totalAssets)aum+=q.totalAssets;if(q.regularMarketVolume)vol+=q.regularMarketVolume*(q.regularMarketPrice||1);if(q.regularMarketChangePercent!=null)pcts.push(q.regularMarketChangePercent);}});
+      m[name]={totalAUM:aum,totalVol:vol,avgPct:pcts.length?pcts.reduce((a,b)=>a+b,0)/pcts.length:null,fundCount:funds.length};
+    });
+    return m;
+  },[visibleIssuers,filteredFunds,quotes]);
+
+  const chartIssuerStats=useMemo(()=>{
+    const m={};
+    chartIssuers.forEach(name=>{
+      const funds=(allFunds||[]).filter(f=>f.issuer===name);let aum=0,vol=0,pcts=[];
+      funds.forEach(f=>{const q=quotes[f.ticker];if(q){if(q.totalAssets)aum+=q.totalAssets;if(q.regularMarketVolume)vol+=q.regularMarketVolume*(q.regularMarketPrice||1);if(q.regularMarketChangePercent!=null)pcts.push(q.regularMarketChangePercent);}});
+      m[name]={totalAUM:aum,totalVol:vol,avgPct:pcts.length?pcts.reduce((a,b)=>a+b,0)/pcts.length:null,fundCount:funds.length};
+    });
+    return m;
+  },[chartIssuers,allFunds,quotes]);
+
+  const aumBar=useMemo(()=>chartIssuers.map(n=>({name:n.split(" ")[0],aum:(chartIssuerStats[n]?.totalAUM||0)/1e9,fill:ISSUER_COLORS[n]||"#888"})),[chartIssuerStats,chartIssuers]);
+  const volBar=useMemo(()=>chartIssuers.map(n=>({name:n.split(" ")[0],vol:(chartIssuerStats[n]?.totalVol||0)/1e6,fill:ISSUER_COLORS[n]||"#888"})),[chartIssuerStats,chartIssuers]);
+
+  const sortedFunds=useMemo(()=>[...filteredFunds].sort((a,b)=>{
+    const qa=quotes[a.ticker]||{},qb=quotes[b.ticker]||{};
+    const val=(f,q)=>sortKey==="aum"?(q.totalAssets||0):sortKey==="vol"?(q.regularMarketVolume||0):sortKey==="pct"?(q.regularMarketChangePercent||0):sortKey==="ticker"?f.ticker:"";
+    const va=val(a,qa),vb=val(b,qb);return typeof va==="string"?sortDir*va.localeCompare(vb):sortDir*(vb-va);
+  }),[filteredFunds,quotes,sortKey,sortDir]);
+
+  const handleSort=k=>{if(sortKey===k)setSortDir(d=>-d);else{setSortKey(k);setSortDir(-1);}};
+  const toggle=setter=>v=>setter(p=>p.includes(v)?p.filter(x=>x!==v):[...p,v]);
+  const gsStats=issuerStats["GraniteShares"];
+  const handleSearch=async()=>{if(!searchTick.trim())return;const sym=searchTick.trim().toUpperCase();const q=await fetchYF([sym]);setSearchRes(q&&q.length?q[0]:{symbol:sym,shortName:"(Demo)",regularMarketPrice:45.67,regularMarketChangePercent:-1.23,totalAssets:2.5e9,regularMarketVolume:1234567});};
+
+  const COLS=[
+    {label:"Ticker",k:"ticker",align:"left"},{label:"Fund Name",k:"",align:"left"},
+    {label:"Company",k:"",align:"left"},{label:"Inv. Type",k:"",align:"left"},
+    {label:"Underlying",k:"",align:"left"},{label:"Return Goal",k:"",align:"left"},
+    {label:"Price",k:"",align:"right"},{label:"% Chg",k:"pct",align:"right"},
+    {label:"AUM",k:"aum",align:"right"},{label:"Volume",k:"vol",align:"right"},
+  ];
+  const chartModeLabel={"pct":"% NAV Change","price":"NAV Price","volume":"Volume"}[chartMode];
+  const chartModeSub={"pct":"Normalized to 0 — relative movement","price":"Actual NAV price over time","volume":"Daily trading volume"}[chartMode];
+
+  if(allFunds===null)return React.createElement(UploadScreen,{onLoad:handleLoad,dark});
+
+  const msProps={dark,bdr,card,text,muted};
+
+  return(
+    <div style={{height:"100vh",display:"flex",flexDirection:"column",background:bg,color:text,fontFamily:"system-ui,-apple-system,sans-serif",fontSize:"14px",overflow:"hidden"}}>
+
+      {/* TOP BAR */}
+      <div style={{flexShrink:0,background:card,borderBottom:`1px solid ${bdr}`,padding:"0 20px",display:"flex",alignItems:"center",gap:"10px",height:"52px",zIndex:50}}>
+        <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+          <div style={{width:"30px",height:"30px",borderRadius:"8px",background:"linear-gradient(135deg,#FF6B35,#FF4500)",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:"12px",color:"#fff"}}>GS</div>
+          <span style={{fontWeight:800,fontSize:"15px",letterSpacing:"-0.02em"}}>ETF Dashboard</span>
+        </div>
+        <span style={{fontSize:"11px",background:"#22c55e22",color:"#22c55e",padding:"2px 8px",borderRadius:"9999px",border:"1px solid #22c55e55"}}>● {allFunds.length.toLocaleString()} funds</span>
+        {demoPrice&&<span style={{fontSize:"11px",background:"#F59E0B22",color:"#F59E0B",padding:"2px 8px",borderRadius:"9999px",border:"1px solid #F59E0B55"}}>Demo prices</span>}
+        {priceLoading&&<span style={{fontSize:"11px",color:muted}}>Fetching prices…</span>}
+        <div style={{flex:1}}/>
+        <div style={{display:"flex",gap:"2px",background:inp,borderRadius:"8px",padding:"2px"}}>
+          {TIMEFRAMES.map(t=>(<button key={t} onClick={()=>setTf(t)} style={{padding:"3px 9px",borderRadius:"6px",border:"none",background:tf===t?card:"transparent",color:tf===t?text:muted,cursor:"pointer",fontSize:"12px",fontWeight:tf===t?700:400,boxShadow:tf===t?"0 1px 3px rgba(0,0,0,0.2)":"none",transition:"all 0.1s"}}>{t}</button>))}
+        </div>
+        <button onClick={()=>setDark(d=>!d)} style={{padding:"5px 11px",borderRadius:"8px",border:`1px solid ${bdr}`,background:"transparent",cursor:"pointer",color:text,fontSize:"12px"}}>{dark?"☀️":"🌙"}</button>
+        <label style={{padding:"5px 11px",borderRadius:"8px",border:`1px solid ${bdr}`,background:"transparent",cursor:"pointer",color:text,fontSize:"12px",whiteSpace:"nowrap"}}>
+          ↑ Update Data
+          <input type="file" accept=".csv" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{const{rows}=parseCSV(ev.target.result);if(rows.length)handleLoad(rows);else alert("No valid rows found.");};r.readAsText(f);e.target.value="";}}/>
+        </label>
+        <button onClick={handleClearData} style={{padding:"5px 11px",borderRadius:"8px",border:`1px solid ${bdr}`,background:"transparent",cursor:"pointer",color:muted,fontSize:"12px"}}>✕ Clear</button>
+      </div>
+
+      <div style={{flex:1,overflowY:tab==="funds"?"hidden":"auto",display:"flex",flexDirection:"column"}}>
+        <div style={{flexShrink:0,padding:"14px 20px 0"}}>
+          {/* FILTER BAR */}
+          <div style={{background:card,border:`1px solid ${bdr}`,borderRadius:"12px",padding:"12px 16px",marginBottom:"12px"}}>
+            <div style={{fontSize:"10px",opacity:0.35,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:"8px",fontWeight:600}}>Filters</div>
+            <div style={{display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"center"}}>
+              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                <span style={{fontSize:"10px",opacity:0.4,textTransform:"uppercase",letterSpacing:"0.05em",whiteSpace:"nowrap"}}>1·Company</span>
+                <div style={{padding:"4px 10px",borderRadius:"9999px",background:"#FF6B3520",border:"1px solid #FF6B35",color:"#FF6B35",fontWeight:700,fontSize:"11px"}}>⭐ GraniteShares</div>
+                <MultiSelect label="+ Add" options={companies.filter(c=>c!=="GraniteShares")} selected={selCompanies} onToggle={toggle(setSelCompanies)} onClear={()=>setSelCompanies([])} onSelectAll={()=>setSelCompanies(companies.filter(c=>c!=="GraniteShares"))} color="#4ECDC4" {...msProps}/>
+              </div>
+              <div style={{width:"1px",height:"22px",background:bdr,flexShrink:0}}/>
+              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                <span style={{fontSize:"10px",opacity:0.4,textTransform:"uppercase",letterSpacing:"0.05em",whiteSpace:"nowrap"}}>2·Funds</span>
+                <MultiSelect label="Select" options={fundTickerOpts} selected={selFunds} onToggle={toggle(setSelFunds)} onClear={()=>setSelFunds([])} color="#9B59B6" {...msProps}/>
+              </div>
+              <div style={{width:"1px",height:"22px",background:bdr,flexShrink:0}}/>
+              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                <span style={{fontSize:"10px",opacity:0.4,textTransform:"uppercase",letterSpacing:"0.05em",whiteSpace:"nowrap"}}>3·Underlying</span>
+                <MultiSelect label="Asset" options={underlyingOpts} selected={selUnderlying} onToggle={toggle(setSelUnderlying)} onClear={()=>setSelUnderlying([])} color="#F39C12" {...msProps}/>
+              </div>
+              <div style={{width:"1px",height:"22px",background:bdr,flexShrink:0}}/>
+              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                <span style={{fontSize:"10px",opacity:0.4,textTransform:"uppercase",letterSpacing:"0.05em",whiteSpace:"nowrap"}}>4·Return Goal</span>
+                <MultiSelect label="Goal" options={returnGoalOpts} selected={selReturnGoal} onToggle={toggle(setSelReturnGoal)} onClear={()=>setSelReturnGoal([])} color="#1ABC9C" {...msProps}/>
+              </div>
+              <div style={{width:"1px",height:"22px",background:bdr,flexShrink:0}}/>
+              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                <span style={{fontSize:"10px",opacity:0.4,textTransform:"uppercase",letterSpacing:"0.05em",whiteSpace:"nowrap"}}>5·Inv. Type</span>
+                <MultiSelect label="Type" options={invTypeOpts} selected={selInvType} onToggle={toggle(setSelInvType)} onClear={()=>setSelInvType([])} color="#E74C3C" {...msProps}/>
+              </div>
+              {(selCompanies.length||selFunds.length||selUnderlying.length||selReturnGoal.length||selInvType.length)?
+                <button onClick={()=>{setSelCompanies([]);setSelFunds([]);setSelUnderlying([]);setSelReturnGoal([]);setSelInvType([]);setChartExcluded([]);}} style={{padding:"4px 10px",borderRadius:"9999px",border:`1px solid ${bdr}`,background:"transparent",color:"#ef4444",cursor:"pointer",fontSize:"11px",marginLeft:"auto"}}>✕ Reset all</button>:null}
+            </div>
+            <div style={{marginTop:"8px",fontSize:"11px",color:muted}}>
+              Showing <strong style={{color:text}}>{filteredFunds.length}</strong> funds across <strong style={{color:text}}>{visibleIssuers.length}</strong> issuers
+              {loadedAt&&<span style={{marginLeft:"12px",opacity:0.5}}>· Data loaded {loadedAt}</span>}
+            </div>
+          </div>
+          {/* TABS + MARKET BAR */}
+          <div style={{display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap",marginBottom:"12px"}}>
+            <div style={{display:"flex",background:card,borderRadius:"10px",padding:"3px",border:`1px solid ${bdr}`}}>
+              {[["overview","📊 Overview"],["funds","📋 Funds"],["chart","📈 Chart"],["compare","🔍 Compare"]].map(([id,label])=>(
+                <button key={id} onClick={()=>setTab(id)} style={{padding:"6px 16px",borderRadius:"8px",border:"none",background:tab===id?(dark?"rgba(255,255,255,0.1)":"rgba(0,0,0,0.06)"):"transparent",color:text,cursor:"pointer",fontSize:"12px",fontWeight:tab===id?700:400,transition:"all 0.1s"}}>{label}</button>
+              ))}
+            </div>
+            <MarketBar {...msProps}/>
+          </div>
+        </div>
+
+        {/* ══ OVERVIEW ══ */}
+        {tab==="overview"&&(
+          <div style={{flex:1,overflowY:"auto",padding:"0 20px 20px"}}>
+            <div style={{display:"flex",flexDirection:"column",gap:"12px"}}>
+              <div style={{background:card,border:`1px solid ${bdr}`,borderRadius:"12px",padding:"14px 16px"}}>
+                <div style={{fontWeight:700,fontSize:"11px",opacity:0.4,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:"10px"}}>Issuer Summary — {tf}</div>
+                <div style={{overflowX:"auto"}}>
+                  <div style={{display:"flex",minWidth:"max-content",border:`1px solid ${bdr}`,borderRadius:"8px",overflow:"hidden"}}>
+                    {visibleIssuers.map(name=>{const s=issuerStats[name]||{};return React.createElement(IssuerCol,{key:name,name,totalAUM:s.totalAUM,totalVol:s.totalVol,avgPct:s.avgPct,fundCount:s.fundCount||0,isGS:name==="GraniteShares",gsAUM:gsStats&&gsStats.totalAUM,gsVol:gsStats&&gsStats.totalVol,gsPct:gsStats&&gsStats.avgPct,dark,bdr});})}
+                  </div>
+                </div>
+              </div>
+              <div style={{background:card,border:`1px solid ${bdr}`,borderRadius:"12px",padding:"14px 16px"}}>
+                <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"12px",flexWrap:"wrap"}}>
+                  <div style={{fontWeight:700,fontSize:"11px",opacity:0.4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Issuer Charts — {selCompanies.length?"Selected":"All"} companies</div>
+                  <div style={{flex:1}}/>
+                  {[["pct","% Perf"],["aum","AUM"],["vol","Volume"]].map(([id,label])=>(<button key={id} onClick={()=>setActiveMetrics(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id])} style={{padding:"3px 10px",borderRadius:"9999px",border:`1px solid ${activeMetrics.includes(id)?"#FF6B35":bdr}`,background:activeMetrics.includes(id)?"#FF6B35":"transparent",color:activeMetrics.includes(id)?"#fff":"inherit",cursor:"pointer",fontSize:"11px",fontWeight:activeMetrics.includes(id)?600:400}}>{label}</button>))}
+                </div>
+                {activeMetrics.includes("aum")&&(<div style={{marginBottom:"18px"}}><div style={{fontSize:"11px",opacity:0.4,marginBottom:"5px",textTransform:"uppercase",letterSpacing:"0.05em"}}>Total AUM ($B)</div><ResponsiveContainer width="100%" height={170}><BarChart data={aumBar} margin={{top:4,right:16,bottom:32,left:0}}><CartesianGrid strokeDasharray="3 3" stroke={dark?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.05)"}/><XAxis dataKey="name" tick={{fontSize:10,fill:muted}} angle={-30} textAnchor="end" height={48}/><YAxis tickFormatter={v=>`$${v.toFixed(0)}B`} tick={{fontSize:10,fill:muted}} width={50}/><Tooltip formatter={v=>[`$${Number(v).toFixed(2)}B`,"AUM"]} contentStyle={ttStyle}/><Bar dataKey="aum" radius={[4,4,0,0]}>{aumBar.map((e,i)=>React.createElement(Cell,{key:i,fill:e.fill}))}</Bar></BarChart></ResponsiveContainer></div>)}
+                {activeMetrics.includes("vol")&&(<div><div style={{fontSize:"11px",opacity:0.4,marginBottom:"5px",textTransform:"uppercase",letterSpacing:"0.05em"}}>Daily Volume ($M)</div><ResponsiveContainer width="100%" height={170}><BarChart data={volBar} margin={{top:4,right:16,bottom:32,left:0}}><CartesianGrid strokeDasharray="3 3" stroke={dark?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.05)"}/><XAxis dataKey="name" tick={{fontSize:10,fill:muted}} angle={-30} textAnchor="end" height={48}/><YAxis tickFormatter={v=>`$${v.toFixed(0)}M`} tick={{fontSize:10,fill:muted}} width={50}/><Tooltip formatter={v=>[`$${Number(v).toFixed(2)}M`,"Volume"]} contentStyle={ttStyle}/><Bar dataKey="vol" radius={[4,4,0,0]}>{volBar.map((e,i)=>React.createElement(Cell,{key:i,fill:e.fill}))}</Bar></BarChart></ResponsiveContainer></div>)}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ══ FUNDS ══ */}
+        {tab==="funds"&&(
+          <div style={{flex:1,display:"flex",flexDirection:"column",padding:"0 20px 20px",overflow:"hidden"}}>
+            <div style={{background:card,border:`1px solid ${bdr}`,borderRadius:"12px",display:"flex",flexDirection:"column",overflow:"hidden",flex:1}}>
+              <div style={{flexShrink:0,padding:"10px 16px",borderBottom:`1px solid ${bdr}`,fontSize:"11px",opacity:0.4,textTransform:"uppercase",letterSpacing:"0.06em"}}>{sortedFunds.length} funds</div>
+              <div style={{flex:1,overflow:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse"}}>
+                  <thead>
+                    <tr>{COLS.map(({label,k,align})=>(
+                      <th key={label} onClick={()=>k&&handleSort(k)} style={{position:"sticky",top:0,zIndex:10,background:thBg,padding:"8px 12px",fontSize:"11px",textTransform:"uppercase",letterSpacing:"0.05em",opacity:0.6,cursor:k?"pointer":"default",textAlign:align,whiteSpace:"nowrap",userSelect:"none",fontWeight:600,boxShadow:`0 1px 0 ${bdr}`}}>
+                        {label}{k&&sortKey===k?(sortDir>0?" ↑":" ↓"):""}
+                      </th>
+                    ))}</tr>
+                  </thead>
+                  <tbody>
+                    {sortedFunds.map((f,i)=>{
+                      const q=quotes[f.ticker]||{};const col=ISSUER_COLORS[f.issuer]||"#888";
+                      return(<tr key={f.ticker+i} style={{borderBottom:`1px solid ${dark?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.04)"}`,fontSize:"13px"}} onMouseEnter={e=>e.currentTarget.style.background=dark?"rgba(255,255,255,0.03)":"rgba(0,0,0,0.02)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                        <td style={{padding:"7px 12px",fontWeight:800,color:col}}>{f.ticker}</td>
+                        <td style={{padding:"7px 12px",opacity:0.7,maxWidth:"200px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.name||"—"}</td>
+                        <td style={{padding:"7px 12px",opacity:0.5,fontSize:"12px",whiteSpace:"nowrap"}}>{f.issuer}</td>
+                        <td style={{padding:"7px 6px"}}><span style={{fontSize:"10px",padding:"2px 6px",borderRadius:"4px",background:dark?"rgba(255,255,255,0.08)":"rgba(0,0,0,0.06)",whiteSpace:"nowrap"}}>{f.type||"—"}</span></td>
+                        <td style={{padding:"7px 12px",opacity:0.55,fontSize:"12px"}}>{f.underlying||"—"}</td>
+                        <td style={{padding:"7px 12px",opacity:0.55,fontSize:"12px",whiteSpace:"nowrap"}}>{f.returnGoal||"—"}</td>
+                        <td style={{padding:"7px 12px",textAlign:"right"}}>{q.regularMarketPrice?`$${q.regularMarketPrice.toFixed(2)}`:"—"}</td>
+                        <td style={{padding:"7px 12px",textAlign:"right",fontWeight:700,color:gc(q.regularMarketChangePercent)}}>{fpct(q.regularMarketChangePercent)}</td>
+                        <td style={{padding:"7px 12px",textAlign:"right",opacity:0.7}}>{f$(q.totalAssets)}</td>
+                        <td style={{padding:"7px 12px",textAlign:"right",opacity:0.7}}>{fvol(q.regularMarketVolume)}</td>
+                      </tr>);
+                    })}
+                  </tbody>
+                </table>
+                {sortedFunds.length===0&&<div style={{padding:"50px",textAlign:"center",opacity:0.3}}>No funds match current filters</div>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ══ CHART ══ */}
+        {tab==="chart"&&(
+          <div style={{flex:1,overflowY:"auto",padding:"0 20px 20px"}}>
+            <div style={{background:card,border:`1px solid ${bdr}`,borderRadius:"12px",padding:"16px"}}>
+              <div style={{display:"flex",alignItems:"flex-start",gap:"12px",marginBottom:"14px",flexWrap:"wrap"}}>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:"13px",marginBottom:"2px"}}>{chartModeLabel} — {tf}</div>
+                  <div style={{fontSize:"11px",color:muted}}>{chartModeSub}</div>
+                  {selUnderlying.length>0&&<div style={{fontSize:"11px",color:"#F39C12",marginTop:"3px"}}>Underlying: {selUnderlying.join(", ")} · {chartFunds.length} funds across {chartAllCompanies.length} companies</div>}
+                  {selFunds.length>0&&<div style={{fontSize:"11px",color:"#9B59B6",marginTop:"3px"}}>Selected: {selFunds.join(", ")}</div>}
+                </div>
+                <div style={{display:"flex",gap:"4px",background:inp,borderRadius:"8px",padding:"3px"}}>
+                  {[["pct","% NAV"],["price","NAV Price"],["volume","Volume"]].map(([id,label])=>(
+                    <button key={id} onClick={()=>setChartMode(id)} style={{padding:"4px 12px",borderRadius:"6px",border:"none",background:chartMode===id?card:"transparent",color:chartMode===id?text:muted,cursor:"pointer",fontSize:"12px",fontWeight:chartMode===id?700:400,boxShadow:chartMode===id?"0 1px 3px rgba(0,0,0,0.2)":"none",transition:"all 0.1s",whiteSpace:"nowrap"}}>{label}</button>
+                  ))}
+                </div>
+              </div>
+              {(selUnderlying.length>0||selFunds.length>0)&&chartAllCompanies.length>1&&(
+                <div style={{display:"flex",gap:"6px",flexWrap:"wrap",marginBottom:"14px",padding:"10px 12px",borderRadius:"10px",background:inp}}>
+                  <span style={{fontSize:"11px",color:muted,alignSelf:"center",marginRight:"4px"}}>Toggle companies:</span>
+                  {chartAllCompanies.map(name=>{
+                    const active=!chartExcluded.includes(name);const color=ISSUER_COLORS[name]||"#888";
+                    return(<button key={name} onClick={()=>setChartExcluded(p=>p.includes(name)?p.filter(x=>x!==name):[...p,name])} style={{padding:"3px 10px",borderRadius:"9999px",border:`1px solid ${active?color:"rgba(128,128,128,0.3)"}`,background:active?color+"25":"transparent",color:active?color:muted,cursor:"pointer",fontSize:"11px",fontWeight:active?600:400,transition:"all 0.15s"}}>{name.split(" ")[0]}</button>);
+                  })}
+                  {chartExcluded.length>0&&<button onClick={()=>setChartExcluded([])} style={{padding:"3px 8px",borderRadius:"9999px",border:`1px solid ${bdr}`,background:"transparent",color:"#ef4444",cursor:"pointer",fontSize:"11px"}}>Show all</button>}
+                </div>
+              )}
+              {chartFunds.length===0?(
+                <div style={{padding:"60px",textAlign:"center",opacity:0.3}}>
+                  <div style={{fontSize:"16px",marginBottom:"8px"}}>No funds to chart</div>
+                  <div style={{fontSize:"12px"}}>Select an underlying asset, specific funds, or add companies</div>
+                </div>
+              ):(
+                <>
+                  <ResponsiveContainer width="100%" height={420}>
+                    {chartMode==="pct"?(
+                      <LineChart data={chartSeriesData} margin={{top:4,right:20,bottom:0,left:0}}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={dark?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.05)"}/>
+                        <XAxis dataKey="label" tick={{fontSize:9,fill:muted}} interval={Math.floor(chartSeriesData.length/6)}/>
+                        <YAxis tickFormatter={v=>`${v.toFixed(1)}%`} tick={{fontSize:10,fill:muted}} width={52}/>
+                        <Tooltip formatter={(v,name)=>[`${Number(v).toFixed(2)}%`,name.replace("_pct","")]} contentStyle={ttStyle}/>
+                        <Legend formatter={v=>v.replace("_pct","")} wrapperStyle={{fontSize:"11px"}}/>
+                        <ReferenceLine y={0} stroke={muted} strokeDasharray="4 4"/>
+                        {chartFunds.slice(0,16).map((f,i)=>{const col=ISSUER_COLORS[f.issuer]||CHART_COLORS[i%CHART_COLORS.length];return React.createElement(Line,{key:f.ticker,dataKey:f.ticker+"_pct",name:f.ticker,stroke:col,dot:false,strokeWidth:2,type:"monotone",connectNulls:true});})}</LineChart>
+                    ):chartMode==="price"?(
+                      <LineChart data={chartSeriesData} margin={{top:4,right:20,bottom:0,left:0}}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={dark?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.05)"}/>
+                        <XAxis dataKey="label" tick={{fontSize:9,fill:muted}} interval={Math.floor(chartSeriesData.length/6)}/>
+                        <YAxis tickFormatter={v=>`$${v.toFixed(2)}`} tick={{fontSize:10,fill:muted}} width={60}/>
+                        <Tooltip formatter={(v,name)=>[`$${Number(v).toFixed(2)}`,name.replace("_price","")]} contentStyle={ttStyle}/>
+                        <Legend formatter={v=>v.replace("_price","")} wrapperStyle={{fontSize:"11px"}}/>
+                        {chartFunds.slice(0,16).map((f,i)=>{const col=ISSUER_COLORS[f.issuer]||CHART_COLORS[i%CHART_COLORS.length];return React.createElement(Line,{key:f.ticker,dataKey:f.ticker+"_price",name:f.ticker,stroke:col,dot:false,strokeWidth:2,type:"monotone",connectNulls:true});})}</LineChart>
+                    ):(
+                      <LineChart data={chartSeriesData} margin={{top:4,right:20,bottom:0,left:0}}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={dark?"rgba(255,255,255,0.04)":"rgba(0,0,0,0.05)"}/>
+                        <XAxis dataKey="label" tick={{fontSize:9,fill:muted}} interval={Math.floor(chartSeriesData.length/6)}/>
+                        <YAxis tickFormatter={v=>fvol(v)} tick={{fontSize:10,fill:muted}} width={60}/>
+                        <Tooltip formatter={(v,name)=>[fvol(Number(v)),name.replace("_vol","")]} contentStyle={ttStyle}/>
+                        <Legend formatter={v=>v.replace("_vol","")} wrapperStyle={{fontSize:"11px"}}/>
+                        {chartFunds.slice(0,16).map((f,i)=>{const col=ISSUER_COLORS[f.issuer]||CHART_COLORS[i%CHART_COLORS.length];return React.createElement(Line,{key:f.ticker,dataKey:f.ticker+"_vol",name:f.ticker,stroke:col,dot:false,strokeWidth:2,type:"monotone",connectNulls:true});})}</LineChart>
+                    )}
+                  </ResponsiveContainer>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:"6px",marginTop:"14px",paddingTop:"12px",borderTop:`1px solid ${bdr}`}}>
+                    {chartFunds.slice(0,16).map((f,i)=>{
+                      const col=ISSUER_COLORS[f.issuer]||CHART_COLORS[i%CHART_COLORS.length];
+                      return(<div key={f.ticker} style={{display:"flex",alignItems:"center",gap:"5px",padding:"4px 10px",borderRadius:"8px",background:col+"15",border:`1px solid ${col}40`}}>
+                        <span style={{width:"8px",height:"8px",borderRadius:"50%",background:col,flexShrink:0}}/>
+                        <span style={{fontSize:"11px",fontWeight:700,color:col}}>{f.ticker}</span>
+                        <span style={{fontSize:"10px",color:muted}}>{f.issuer.split(" ")[0]}</span>
+                      </div>);
+                    })}
+                    {chartFunds.length>16&&<div style={{fontSize:"11px",color:muted,alignSelf:"center"}}>+{chartFunds.length-16} more</div>}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ══ COMPARE ══ */}
+        {tab==="compare"&&(
+          <div style={{flex:1,overflowY:"auto",padding:"0 20px 20px"}}>
+            <div style={{background:card,border:`1px solid ${bdr}`,borderRadius:"12px",padding:"16px"}}>
+              <div style={{fontWeight:700,fontSize:"11px",opacity:0.4,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:"10px"}}>Search Any Ticker</div>
+              <div style={{display:"flex",gap:"8px"}}>
+                <input value={searchTick} onChange={e=>setSearchTick(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&handleSearch()} placeholder="e.g. NVDA, SPY, QQQ" style={{flex:1,padding:"8px 12px",borderRadius:"8px",border:`1px solid ${bdr}`,background:inp,color:text,fontSize:"14px",outline:"none"}}/>
+                <button onClick={handleSearch} style={{padding:"8px 20px",borderRadius:"8px",background:"#FF6B35",color:"#fff",border:"none",cursor:"pointer",fontWeight:700,fontSize:"14px"}}>Search</button>
+              </div>
+              {searchRes&&(
+                <div style={{marginTop:"14px",padding:"14px",borderRadius:"10px",background:inp,border:`1px solid ${bdr}`}}>
+                  <div style={{fontWeight:900,fontSize:"24px",marginBottom:"2px"}}>{searchRes.symbol}</div>
+                  <div style={{opacity:0.45,fontSize:"13px",marginBottom:"12px"}}>{searchRes.shortName||"—"}</div>
+                  <div style={{display:"flex",gap:"10px",flexWrap:"wrap"}}>
+                    {[["Price",searchRes.regularMarketPrice?`$${searchRes.regularMarketPrice.toFixed(2)}`:"—",null],["Day %",fpct(searchRes.regularMarketChangePercent),gc(searchRes.regularMarketChangePercent)],["AUM",f$(searchRes.totalAssets),null],["Volume",fvol(searchRes.regularMarketVolume),null]].map(([l,v,c])=>(
+                      <div key={l} style={{padding:"8px 14px",borderRadius:"8px",background:dark?"rgba(255,255,255,0.05)":"rgba(0,0,0,0.04)",minWidth:"90px"}}>
+                        <div style={{fontSize:"10px",opacity:0.45,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:"2px"}}>{l}</div>
+                        <div style={{fontSize:"18px",fontWeight:800,color:c||"inherit"}}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
